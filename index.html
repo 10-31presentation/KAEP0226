@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#f7f5ee" />
+    <title>おぼえる-ですく｜暗記リスト</title>
+    <link rel="icon" href="data:," />
+    <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin />
+    <link rel="stylesheet" href="style.css" />
+    <link rel="stylesheet" href="enhancements.css" />
+    <script defer src="https://cdn.jsdelivr.net/npm/p5@1.11.11/lib/p5.min.js"></script>
+    <script defer src="sketch.js"></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <img class="header-cunecuneboy" src="cunecuneboy.png" alt="" aria-hidden="true" hidden />
+      <a class="brand" href="#main"><span class="brand-dot">●</span> おぼえる-ですく</a>
+      <button id="show-guide" class="guide-button" type="button">？ 説明書を見る</button>
+      <p id="today-label"></p>
+      <button id="reset-app" class="reset-app-button" type="button" aria-label="すべてのデータを初期化">初期化</button>
+      <button id="header-warning" class="header-warning" type="button" aria-label="最近練習していないカードは0枚です">
+        <strong id="header-warning-count">0</strong><span>枚 要確認</span>
+      </button>
+      <button class="avatar" type="button" aria-label="ユーザー設定">ゆ</button>
+    </header>
+
+    <main id="main" class="layout">
+      <aside class="sidebar" aria-label="復習とカードの色の説明">
+        <section class="review-panel" aria-labelledby="review-title">
+          <div id="p5-accent" aria-hidden="true"></div>
+          <div class="review-copy">
+            <p class="section-label">ALL CARDS</p>
+            <h2 id="review-title">全てのカードを練習</h2>
+            <button id="start-review" class="dark-button" type="button">練習をはじめる <span>→</span></button>
+          </div>
+          <div class="review-count"><span>カードは</span><strong id="due-count">0</strong><span>個です</span></div>
+        </section>
+
+        <section id="folder-practice" class="folder-practice-panel" aria-labelledby="folder-practice-title" hidden>
+          <div>
+            <p class="section-label">FOLDER PRACTICE</p>
+            <h2 id="folder-practice-title">このフォルダのカードをすべて練習</h2>
+            <p id="folder-practice-description">このフォルダに入っているカードをまとめて練習します。</p>
+          </div>
+          <button id="start-folder-practice" class="folder-practice-button" type="button">すべて練習する <span>→</span></button>
+        </section>
+
+        <section class="practice-guide" aria-label="カードの色と練習の目安">
+          <ul>
+            <li class="practice-guide-white"><span class="practice-swatch practice-swatch-white" aria-hidden="true"></span><div><span>5日未満練習していない（<strong>白</strong>）カード</span><button type="button" data-practice-range="under-five">練習する</button></div></li>
+            <li class="practice-guide-green"><span class="practice-swatch practice-swatch-green" aria-hidden="true"></span><div><span>5〜6日間練習していない（<strong>緑</strong>）カード</span><button type="button" data-practice-range="five-days">練習する</button></div></li>
+            <li class="practice-guide-yellow"><span class="practice-swatch practice-swatch-yellow" aria-hidden="true"></span><div><span>7〜29日間練習していない（<strong>黄</strong>）カード</span><button type="button" data-practice-range="week">練習する</button></div></li>
+            <li class="practice-guide-red"><span class="practice-swatch practice-swatch-red" aria-hidden="true"></span><div><span>30日以上未練習・未習得（<strong>赤</strong>）カード</span><button type="button" data-practice-range="month">練習する</button></div></li>
+          </ul>
+        </section>
+      </aside>
+
+      <section class="content">
+        <section class="desk-search" aria-labelledby="desk-search-title">
+          <label id="desk-search-title" for="desk-search-input">カード・フォルダ検索</label>
+          <div class="desk-search-field">
+            <span aria-hidden="true">⌕</span>
+            <input id="desk-search-input" type="search" placeholder="名前やメモを入力" autocomplete="off" />
+          </div>
+          <div id="desk-search-results" class="desk-search-results" aria-live="polite" hidden></div>
+        </section>
+
+        <section class="desktop-section" aria-labelledby="desktop-title">
+          <div class="section-heading desktop-heading">
+            <div class="desktop-title-row">
+              <h2 id="desktop-title">Desk</h2>
+              <p class="desktop-open-hint">ダブルクリックで開く・右クリックで並び順を選ぶ</p>
+            </div>
+            <div class="desktop-size-controls" aria-label="Deskの大きさ設定">
+              <label for="desktop-height">大きさ <input id="desktop-height" type="range" min="120" max="2400" step="10" /><output id="desktop-height-value">230px</output></label>
+            </div>
+          </div>
+          <div id="folder-desktop" class="folder-desktop" aria-label="フォルダとカードを自由に配置するエリア">
+            <p class="desktop-guide">上の大きさスライダーでDeskの縦幅を変更</p>
+          </div>
+        </section>
+
+        <div class="creation-tools" aria-label="作業メニュー">
+          <div id="folder-header-actions" class="folder-header-actions folder-view-actions" hidden>
+            <button id="edit-folder" class="edit-folder-button" type="button">フォルダを編集</button>
+            <button id="delete-folder" class="delete-folder-button" type="button">このフォルダを削除</button>
+          </div>
+          <button id="save-data" class="save-button" type="button">保存する</button>
+          <p id="save-status" aria-live="polite">保存済み</p>
+          <button id="add-card" class="primary-button" type="button">＋ カードを追加</button>
+          <button id="add-folder" class="secondary-button" type="button">＋ フォルダを追加</button>
+        </div>
+      </section>
+    </main>
+
+    <div id="desktop-context-menu" class="desktop-context-menu" role="menu" aria-label="Deskメニュー" hidden>
+      <p class="desktop-context-heading">整頓する順番</p>
+      <button type="button" role="menuitem" data-desktop-action="organize" data-sort-order="name"><span aria-hidden="true">あ</span>あいうえお順</button>
+      <button type="button" role="menuitem" data-desktop-action="organize" data-sort-order="recent"><span aria-hidden="true">◷</span>最近追加した順</button>
+      <button type="button" role="menuitem" data-desktop-action="organize" data-sort-order="color"><span aria-hidden="true">●</span>色順（緑→黄→赤）</button>
+      <hr />
+      <button type="button" role="menuitem" data-desktop-action="add-card"><span aria-hidden="true">＋</span>カードを追加</button>
+      <button type="button" role="menuitem" data-desktop-action="add-folder"><span aria-hidden="true">▰</span>フォルダを追加</button>
+    </div>
+
+    <dialog id="card-dialog" class="dialog">
+      <form id="card-form" method="dialog">
+        <div class="dialog-heading"><div><p id="card-dialog-label" class="section-label">NEW MEMORY</p><h2 id="card-dialog-title">暗記カードを追加</h2></div><button class="close-button" type="button" data-close-dialog="card-dialog" aria-label="閉じる">×</button></div>
+        <label>単語<input id="card-front" required placeholder="例：apple" autocomplete="off" /></label>
+        <label>意味<textarea id="card-back" required placeholder="例：りんご"></textarea></label>
+        <label>メモ（任意）<textarea id="card-memo" placeholder="覚え方や補足など。空欄でも追加できます"></textarea></label>
+        <label>置く場所<select id="card-folder"></select></label>
+        <p class="form-help">「Deskに置く」を選ぶと、カードをフォルダの外に置けます。</p>
+        <div class="dialog-actions"><button type="button" class="text-button" data-close-dialog="card-dialog">キャンセル</button><button id="save-card" type="submit" class="primary-button">追加する</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="folder-dialog" class="dialog small-dialog">
+      <form id="folder-form" method="dialog">
+        <div class="dialog-heading"><div><p id="folder-dialog-label" class="section-label">NEW FOLDER</p><h2 id="folder-dialog-title">フォルダを追加</h2></div><button class="close-button" type="button" data-close-dialog="folder-dialog" aria-label="閉じる">×</button></div>
+        <label>フォルダ名<input id="folder-name" required placeholder="例：動詞" autocomplete="off" /></label>
+        <label>入れる場所<select id="parent-folder"></select></label>
+        <div class="dialog-actions"><button type="button" class="text-button" data-close-dialog="folder-dialog">キャンセル</button><button id="save-folder" type="submit" class="primary-button">作成する</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="guide-dialog" class="dialog guide-dialog">
+      <div class="guide-dialog-content">
+        <div class="dialog-heading"><div><p class="section-label">HOW TO USE</p><h2>使い方</h2></div><button class="close-button" type="button" data-close-dialog="guide-dialog" aria-label="閉じる">×</button></div>
+        <ol class="guide-list">
+          <li><strong>単語カード・フォルダを作る</strong><span>右下のボタンから、単語カードやフォルダを作ることができます。<br>フォルダは、単語カードをまとめて入れておく箱のようなものです。<br><br>単語カードは、最後に練習してからの日数や、練習結果によって色が変わります。<br><br><strong>5日未満・未練習：白</strong><br><strong>5〜6日：緑</strong><br><strong>7〜29日：黄</strong><br><strong>30日以上、または「まだあやしい」を選んだ：赤</strong></span></li>
+          <li><strong>フォルダを開く</strong><span>開きたいフォルダをダブルクリックすると開きます。<br>閉じるときは、右上のバツマークを押します。</span></li>
+          <li><strong>場所を移動する・整頓する</strong><span>フォルダや単語カードは、マウスでつかんだまま動かすことで、好きな場所に移動できます。Deskの空いている場所を押したまま囲むと、複数のフォルダやカードを選択できます。選択した中の1つを動かすと、まとめて移動できます。Shiftキーを押しながら囲むと、選択を追加できます。<br><br>Deskや開いたフォルダの中を右クリックすると、あいうえお順・最近追加した順・色順から選んで整頓できます。色順は緑→黄→赤の順です。右クリックメニューからカードやフォルダを追加することもできます。</span></li>
+          <li><strong>名前や内容を変える・消す</strong><span>フォルダの名前を変えるときは、フォルダを開きます。画面右下の「保存する」ボタンの上に「フォルダを編集」「このフォルダを削除」が表示されます。<br><br>単語カードは、各カードの右上にある「編集」ボタンから内容を変えることができます。<br><br>フォルダや単語カードを消したいときは、マウスでつかんだままゴミ箱マークのところまで動かします。複数選択している場合は、まとめてゴミ箱へ入れられます。ゴミ箱をダブルクリックすると中身を開き、「取り出す」でDeskへ戻せます。「中身をすべて削除」を押すと、ゴミ箱を空にできます。</span></li>
+          <li><strong>カードやフォルダを探す</strong><span>画面右側の「カード・フォルダ検索」に文字を入力します。カードの単語・説明・メモ、またはフォルダ名から検索できます。検索結果を押すと、その項目がある場所を開いて表示します。</span></li>
+          <li><strong>練習する</strong><span>単語カードをクリックすると、そのカードを練習できます。<br><br>左側から<br>「全てのカードを練習」<br>「フォルダのカードをすべて練習」<br>「色ごとに練習」<br>など、いろいろな練習方法を選ぶことができます。<br><br>画面上部の「要確認」を押すと、最近練習していないカードをまとめて練習できます。</span></li>
+          <li><strong>保存する・初期化する</strong><span>変更内容は3分後に自動保存されます。すぐに保存したいときは、右下の「保存する」ボタンを押してください。<br><br>すべてを最初の状態へ戻したいときは、画面右上の小さな「初期化」を押します。カードやフォルダ、ゴミ箱の中身も消えるため、確認画面をよく読んでから実行してください。</span></li>
+        </ol>
+        <div class="dialog-actions"><button class="primary-button" type="button" data-close-dialog="guide-dialog">わかった</button></div>
+      </div>
+    </dialog>
+
+    <dialog id="review-direction-dialog" class="dialog direction-dialog">
+      <div class="direction-dialog-content">
+        <div class="dialog-heading"><div><p class="section-label">REVIEW MODE</p><h2>どちらを覚える？</h2></div><button class="close-button" type="button" data-close-dialog="review-direction-dialog" aria-label="閉じる">×</button></div>
+        <p>問題として見たい方を選んでください。</p>
+        <div class="direction-options">
+          <button type="button" class="direction-option" data-review-direction="word-to-meaning"><strong>単語 → 説明</strong><span>単語を見て、説明を答える</span></button>
+          <button type="button" class="direction-option" data-review-direction="meaning-to-word"><strong>説明 → 単語</strong><span>説明を見て、単語を答える</span></button>
+        </div>
+      </div>
+    </dialog>
+    <dialog id="review-dialog" class="review-dialog"><div id="review-content"></div></dialog>
+  </body>
+</html>
