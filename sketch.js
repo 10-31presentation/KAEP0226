@@ -1,12 +1,15 @@
 const STORAGE_KEY = "oboeru-dana-data-v1";
 const DATABASE_NAME = "oboeru-dana-database";
-const DATABASE_VERSION = 1;
+const DATABASE_VERSION = 4;
 const DATABASE_STORE = "app-data";
 const DATABASE_RECORD_KEY = "current";
 const FIRST_VISIT_KEY = "oboeru-desk-guide-seen-v1";
 const DAY = 86400000;
 const AUTO_SAVE_DELAY = 3 * 60 * 1000;
-const DEMO_CARD_IDS = new Set(["apple", "library", "discover", "daika"]);
+const MAX_DESKTOP_HEIGHT = 5000;
+const BACKUP_FORMAT = "oboeru-desk-backup";
+let pendingImport = null;
+let importInProgress = false;
 const initialData = {
   folders: [],
   cards: [],
@@ -34,8 +37,10 @@ let saveError = false;
 let changeRevision = 0;
 let autoSaveTimer = null;
 let contextMenuParentId = null;
+let contextMenuItemId = null;
 let desktopSelection = null;
 let selectedDesktopItemIds = new Set();
+let guidePageIndex = 0;
 
 function daysAgo(days) { return Date.now() - days * DAY; }
 function createEmptyData() {
@@ -55,20 +60,22 @@ function closeDialog(dialog) {
     dialog.removeAttribute("open");
     dialog.classList.remove("dialog-fallback-modal");
     if (!document.querySelector("dialog.dialog-fallback-modal[open]")) document.body.classList.remove("dialog-fallback-open");
+    if (dialog.id === "guide-dialog") unlockGuideScroll();
     return;
   }
   if (typeof dialog.close === "function") {
     dialog.close();
+    if (dialog.id === "guide-dialog") unlockGuideScroll();
     return;
   }
   dialog.removeAttribute("open");
   dialog.classList.remove("dialog-fallback-modal");
   if (!document.querySelector("dialog.dialog-fallback-modal[open]")) document.body.classList.remove("dialog-fallback-open");
+  if (dialog.id === "guide-dialog") unlockGuideScroll();
 }
 function prepareData(saved) {
   if (!saved || typeof saved !== "object") return createEmptyData();
-  // 以前の見本カードだけを取り除き、利用者が作ったカードは残す。
-  const cards = (saved.cards || []).filter(card => !DEMO_CARD_IDS.has(card.id));
+  const cards = saved.cards || [];
   return {
     ...saved,
     folders: positionFolders(saved.folders || []),
@@ -92,6 +99,7 @@ function openDatabase() {
     const request = indexedDB.open(DATABASE_NAME, DATABASE_VERSION);
     request.onupgradeneeded = () => {
       if (!request.result.objectStoreNames.contains(DATABASE_STORE)) request.result.createObjectStore(DATABASE_STORE, { keyPath: "key" });
+      if (request.result.objectStoreNames.contains("accounts")) request.result.deleteObjectStore("accounts");
     };
     request.onsuccess = () => { database = request.result; resolve(database); };
     request.onerror = () => reject(request.error);
@@ -155,22 +163,137 @@ function positionDesktopCards(cards) {
   return cards.map(card => {
     const group = card.folderId || "root";
     const groupIndex = groupIndexes.get(group) || 0;
-    const positioned = { ...card, x: Number.isFinite(card.x) ? card.x : 20 + (groupIndex % 5) * 145, y: Number.isFinite(card.y) ? card.y : 152 + Math.floor(groupIndex / 5) * 130 };
+    const positioned = { ...card, memoVisibility: card.memoVisibility === "both" ? "both" : "answer-only", x: Number.isFinite(card.x) ? card.x : 20 + (groupIndex % 5) * 145, y: Number.isFinite(card.y) ? card.y : 152 + Math.floor(groupIndex / 5) * 130 };
     groupIndexes.set(group, groupIndex + 1);
     return positioned;
   });
 }
-async function saveData() {
+async function saveData(value = data) {
   try {
-    await writeDatabase(data);
+    await writeDatabase(value);
   } catch {
     // IndexedDBが利用できない環境だけ、従来の保存先に戻す。
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(value));
   }
 }
 function clearAutoSaveTimer() {
   if (autoSaveTimer !== null) clearTimeout(autoSaveTimer);
   autoSaveTimer = null;
+}
+function downloadData() {
+  const backup = { format: BACKUP_FORMAT, version: 1, exportedAt: new Date().toISOString(), data };
+  const url = URL.createObjectURL(new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `oboeru-desk-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+function validateBackup(backup) {
+  const invalid = () => { throw new Error("このサイトの有効なバックアップJSONを選んでください。"); };
+  const object = value => value !== null && typeof value === "object" && !Array.isArray(value);
+  if (!object(backup) || backup.format !== BACKUP_FORMAT || backup.version !== 1 || !object(backup.data)) invalid();
+  const value = backup.data;
+  if (!Array.isArray(value.folders) || !Array.isArray(value.cards) || !object(value.trash)
+    || !Array.isArray(value.trash.folders) || !Array.isArray(value.trash.cards) || !object(value.settings)) invalid();
+  const folders = [...value.folders, ...value.trash.folders];
+  const cards = [...value.cards, ...value.trash.cards];
+  const ids = new Set();
+  for (const item of [...folders, ...cards]) {
+    if (!object(item) || typeof item.id !== "string" || !item.id || ids.has(item.id)) invalid();
+    ids.add(item.id);
+    for (const key of ["x", "y", "createdAt", "lastPracticed", "interval", "windowX", "windowY", "windowWidth", "windowHeight"]) {
+      if (item[key] != null && !Number.isFinite(item[key])) invalid();
+    }
+  }
+  const folderMap = new Map(folders.map(folder => [folder.id, folder]));
+  for (const folder of folders) {
+    if (typeof folder.name !== "string" || !folder.name.trim()) invalid();
+    const ancestors = new Set([folder.id]);
+    let parentId = folder.parentId;
+    while (parentId != null) {
+      if (typeof parentId !== "string" || !folderMap.has(parentId) || ancestors.has(parentId)) invalid();
+      ancestors.add(parentId);
+      parentId = folderMap.get(parentId).parentId;
+    }
+  }
+  const activeFolders = new Set(value.folders.map(folder => folder.id));
+  for (const folder of value.folders) {
+    if (folder.parentId != null && !activeFolders.has(folder.parentId)) invalid();
+  }
+  for (const card of cards) {
+    if (typeof card.front !== "string" || typeof card.back !== "string"
+      || (card.memo != null && typeof card.memo !== "string")
+      || (card.folderId != null && !folderMap.has(card.folderId))
+      || (card.memoVisibility != null && !["both", "answer-only"].includes(card.memoVisibility))
+      || (card.needsReview != null && typeof card.needsReview !== "boolean")) invalid();
+  }
+  for (const card of value.cards) {
+    if (card.folderId != null && !activeFolders.has(card.folderId)) invalid();
+  }
+  if (!Number.isFinite(value.settings.desktopHeight) || value.settings.desktopHeight < 120
+    || value.settings.desktopHeight > MAX_DESKTOP_HEIGHT) invalid();
+  return prepareData(value);
+}
+async function selectBackup(event) {
+  const file = event.target.files[0];
+  event.target.value = "";
+  if (!file) return;
+  try {
+    const candidate = validateBackup(JSON.parse(await file.text()));
+    pendingImport = candidate;
+    document.getElementById("import-summary").textContent = `${file.name}：カード ${candidate.cards.length}枚、フォルダ ${candidate.folders.length}個、ゴミ箱 ${candidate.trash.cards.length + candidate.trash.folders.length}件`;
+    document.getElementById("import-status").textContent = "";
+    showDialog(document.getElementById("import-dialog"));
+  } catch {
+    window.alert("読み込めませんでした。このサイトからダウンロードした有効なJSONファイルを選んでください。現在のデータは変更していません。");
+  }
+}
+async function importBackup() {
+  if (!pendingImport || importInProgress) return;
+  const status = document.getElementById("import-status");
+  if (isSaving) { status.textContent = "保存中です。少し待ってからもう一度押してください。"; return; }
+  importInProgress = true;
+  clearAutoSaveTimer();
+  document.getElementById("confirm-import").disabled = true;
+  document.getElementById("cancel-import").disabled = true;
+  status.textContent = "上書き保存中…";
+  try {
+    // 保存できることを確認してから表示中のデータを置き換える。
+    await saveData(pendingImport);
+    cancelAllPointerActions();
+    closeDesktopContextMenu();
+    data = pendingImport;
+    pendingImport = null;
+    selectedFolder = "all";
+    activeFolderWindowId = null;
+    trashOpen = false;
+    reviewQueue = [];
+    reviewIndex = 0;
+    answerVisible = false;
+    editingCardId = null;
+    editingFolderId = null;
+    selectedDesktopItemIds.clear();
+    document.getElementById("desk-search-input").value = "";
+    document.getElementById("desktop-height").value = data.settings.desktopHeight;
+    isDirty = false;
+    saveError = false;
+    changeRevision++;
+    applyDesktopSize();
+    render();
+    updateSaveStatus();
+    closeDialog(document.getElementById("import-dialog"));
+    document.getElementById("save-status").textContent = "アップロードしたデータを保存しました";
+  } catch {
+    status.textContent = "保存できませんでした。現在のデータは変更していません。再試行してください。";
+    if (isDirty) scheduleAutoSave();
+  } finally {
+    importInProgress = false;
+    document.getElementById("confirm-import").disabled = false;
+    document.getElementById("cancel-import").disabled = false;
+  }
 }
 function scheduleAutoSave() {
   clearAutoSaveTimer();
@@ -251,10 +374,33 @@ function cardsForPracticeRange(range) {
 
 document.addEventListener("DOMContentLoaded", async () => {
   data = await loadData();
+  document.getElementById("download-data").disabled = false;
+  document.getElementById("upload-data").disabled = false;
+  document.getElementById("download-data").addEventListener("click", downloadData);
+  document.getElementById("upload-data").addEventListener("click", () => document.getElementById("upload-data-file").click());
+  document.getElementById("upload-data-file").addEventListener("change", selectBackup);
+  document.getElementById("confirm-import").addEventListener("click", importBackup);
+  document.getElementById("cancel-import").addEventListener("click", () => {
+    pendingImport = null;
+    closeDialog(document.getElementById("import-dialog"));
+  });
+  document.getElementById("import-dialog").addEventListener("cancel", event => {
+    if (importInProgress) event.preventDefault();
+    else pendingImport = null;
+  });
   document.getElementById("today-label").textContent = new Intl.DateTimeFormat("ja-JP", { month: "long", day: "numeric", weekday: "short" }).format(new Date());
   document.getElementById("add-card").addEventListener("click", () => openCardDialog());
   document.getElementById("add-folder").addEventListener("click", () => openFolderDialog());
-  document.getElementById("show-guide").addEventListener("click", () => showDialog(document.getElementById("guide-dialog")));
+  document.getElementById("show-guide").addEventListener("click", openGuide);
+  document.getElementById("guide-dialog").addEventListener("close", () => {
+    if (!document.getElementById("guide-dialog").open) unlockGuideScroll();
+  });
+  document.getElementById("guide-previous").addEventListener("click", () => setGuidePage(guidePageIndex - 1));
+  document.getElementById("guide-next").addEventListener("click", () => {
+    const pageCount = document.querySelectorAll(".guide-page").length;
+    if (guidePageIndex === pageCount - 1) closeDialog(document.getElementById("guide-dialog"));
+    else setGuidePage(guidePageIndex + 1);
+  });
   document.getElementById("reset-app").addEventListener("click", resetApplication);
   document.getElementById("save-data").addEventListener("click", saveCurrentData);
   document.getElementById("edit-folder").addEventListener("click", () => openFolderDialog(data.folders.find(folder => folder.id === selectedFolder)));
@@ -294,12 +440,59 @@ function showGuideOnFirstVisit() {
     if (localStorage.getItem(FIRST_VISIT_KEY)) return;
     localStorage.setItem(FIRST_VISIT_KEY, "seen");
   } catch {}
+  openGuide();
+}
+let guideScrollPosition = null;
+function lockGuideScroll() {
+  if (guideScrollPosition) return;
+  guideScrollPosition = { x: window.scrollX, y: window.scrollY };
+  const root = document.documentElement;
+  root.style.setProperty("--guide-scroll-top", `${-guideScrollPosition.y}px`);
+  root.style.setProperty("--guide-scroll-left", `${-guideScrollPosition.x}px`);
+  root.classList.add("guide-open");
+}
+function unlockGuideScroll() {
+  if (!guideScrollPosition) return;
+  const position = guideScrollPosition;
+  guideScrollPosition = null;
+  const root = document.documentElement;
+  root.classList.remove("guide-open");
+  root.style.removeProperty("--guide-scroll-top");
+  root.style.removeProperty("--guide-scroll-left");
+  window.scrollTo(position.x, position.y);
+}
+function openGuide() {
+  lockGuideScroll();
   showDialog(document.getElementById("guide-dialog"));
+  setGuidePage(0);
+}
+function updateGuideControls() {
+  const pageCount = document.querySelectorAll(".guide-page").length;
+  document.getElementById("guide-page-count").textContent = `${guidePageIndex + 1} / ${pageCount}`;
+  document.getElementById("guide-previous").disabled = guidePageIndex === 0;
+  document.getElementById("guide-next").textContent = guidePageIndex === pageCount - 1 ? "説明書を閉じる" : "次へ →";
+}
+function setGuidePage(index) {
+  const pages = [...document.querySelectorAll(".guide-page")];
+  guidePageIndex = Math.max(0, Math.min(index, pages.length - 1));
+  pages.forEach((page, pageIndex) => { page.hidden = pageIndex !== guidePageIndex; });
+  document.getElementById("guide-pages").scrollTop = 0;
+  updateGuideControls();
 }
 async function resetApplication() {
-  if (!window.confirm("初期化しますか？この操作は取り消せません")) return;
-  if (!window.confirm("本当に初期化しますか？")) return;
-  if (!window.confirm("本当の本当に初期化しますか？")) return;
+  const confirmations = [
+    "初期化しますか？この操作は取り消せません",
+    "本当に初期化しますか？",
+    "本当の本当に初期化しますか？",
+    "本当に？",
+    "絶対？",
+    "これが最後です。本当に初期化しますか？",
+    "やっぱこれが最後です。本当に初期化しますか？",
+    "本当に最後です。初期化しますか？\n※これは本当に最後の警告です"
+  ];
+  for (const message of confirmations) {
+    if (!window.confirm(message)) return;
+  }
   cancelAllPointerActions();
   closeDesktopContextMenu();
   data = createEmptyData();
@@ -333,23 +526,47 @@ function setupDesktopContextMenu() {
     if (!surface || surface.classList.contains("trash-window-content")) return;
     event.preventDefault();
     cancelAllPointerActions();
+    const item = event.target.closest(".desktop-card, .desktop-folder");
+    const itemType = item && surface.contains(item) ? (item.classList.contains("desktop-card") ? "card" : "folder") : null;
     contextMenuParentId = surface.dataset.parentId || null;
+    contextMenuItemId = itemType ? item.dataset.itemId : null;
+    document.getElementById("desktop-context-surface-actions").hidden = Boolean(itemType);
+    document.getElementById("desktop-context-folder-actions").hidden = itemType !== "folder";
+    document.getElementById("desktop-context-card-actions").hidden = itemType !== "card";
+    menu.setAttribute("aria-label", itemType === "folder" ? "フォルダメニュー" : itemType === "card" ? "カードメニュー" : "Deskメニュー");
     menu.hidden = false;
     menu.style.left = `${event.clientX}px`;
     menu.style.top = `${event.clientY}px`;
     const rect = menu.getBoundingClientRect();
     menu.style.left = `${Math.max(8, Math.min(event.clientX, window.innerWidth - rect.width - 8))}px`;
     menu.style.top = `${Math.max(8, Math.min(event.clientY, window.innerHeight - rect.height - 8))}px`;
-    menu.querySelector("button")?.focus();
+    menu.querySelector(":scope > div:not([hidden]) > button")?.focus();
   });
   menu.addEventListener("click", event => {
     const button = event.target.closest("[data-desktop-action]");
     if (!button) return;
     const parentId = contextMenuParentId;
+    const itemId = contextMenuItemId;
     closeDesktopContextMenu();
     if (button.dataset.desktopAction === "organize") organizeDesktopSurface(parentId, button.dataset.sortOrder);
     if (button.dataset.desktopAction === "add-card") openCardDialog(null, parentId);
     if (button.dataset.desktopAction === "add-folder") openFolderDialog(null, parentId);
+    if (button.dataset.desktopAction === "edit-folder") {
+      const folder = data.folders.find(item => item.id === itemId);
+      if (folder) openFolderDialog(folder);
+    }
+    if (button.dataset.desktopAction === "delete-folder") {
+      const folder = data.folders.find(item => item.id === itemId);
+      if (folder) deleteFolder(folder);
+    }
+    if (button.dataset.desktopAction === "edit-card") {
+      const card = data.cards.find(item => item.id === itemId);
+      if (card) openCardDialog(card);
+    }
+    if (button.dataset.desktopAction === "delete-card") {
+      const card = data.cards.find(item => item.id === itemId);
+      if (card) deleteCard(card);
+    }
   });
   document.addEventListener("pointerdown", event => {
     if (!menu.hidden && !event.target.closest("#desktop-context-menu")) closeDesktopContextMenu();
@@ -362,6 +579,7 @@ function closeDesktopContextMenu() {
   if (!menu) return;
   menu.hidden = true;
   contextMenuParentId = null;
+  contextMenuItemId = null;
 }
 
 function setupDesktopSelection() {
@@ -575,7 +793,7 @@ function organizeDesktopSurface(parentId, sortOrder) {
   const requiredHeight = margin * 2 + rows * itemHeight + Math.max(0, rows - 1) * gap;
   if (!parentId) {
     if (requiredHeight > data.settings.desktopHeight) {
-      data.settings.desktopHeight = Math.min(2400, Math.ceil(requiredHeight / 10) * 10);
+      data.settings.desktopHeight = Math.min(MAX_DESKTOP_HEIGHT, Math.ceil(requiredHeight / 10) * 10);
       document.getElementById("desktop-height").value = data.settings.desktopHeight;
       applyDesktopSize();
     }
@@ -587,7 +805,7 @@ function organizeDesktopSurface(parentId, sortOrder) {
       const requiredWindowHeight = requiredHeight + 42;
       const requiredDesktopHeight = folderWindow.offsetTop + requiredWindowHeight + 4;
       if (requiredDesktopHeight > data.settings.desktopHeight) {
-        data.settings.desktopHeight = Math.min(2400, Math.ceil(requiredDesktopHeight / 10) * 10);
+        data.settings.desktopHeight = Math.min(MAX_DESKTOP_HEIGHT, Math.ceil(requiredDesktopHeight / 10) * 10);
         document.getElementById("desktop-height").value = data.settings.desktopHeight;
         applyDesktopSize();
       }
@@ -1199,7 +1417,11 @@ function createDesktopCard(card, index) {
   item.style.top = `${card.y}px`;
   item.title = card.front;
   item.setAttribute("aria-label", `${card.front}を練習`);
-  item.innerHTML = `<div class="desktop-card-actions"><button class="desktop-card-edit" type="button" aria-label="${escapeHtml(card.front)}を編集">編集</button><button class="desktop-card-delete" type="button" aria-label="${escapeHtml(card.front)}を削除">×</button></div><span class="desktop-card-icon">WORD CARD</span><span class="desktop-card-front">${escapeHtml(displayFront)}</span>`;
+  item.innerHTML = `<div class="desktop-card-actions"><button class="desktop-card-edit" type="button">編集</button><button class="desktop-card-delete" type="button">×</button></div><span class="desktop-card-icon">WORD CARD</span><span class="desktop-card-front"></span>`;
+  // 入力内容をHTMLとして解析させず、文字列として設定する。
+  item.querySelector(".desktop-card-edit").setAttribute("aria-label", `${card.front}を編集`);
+  item.querySelector(".desktop-card-delete").setAttribute("aria-label", `${card.front}を削除`);
+  item.querySelector(".desktop-card-front").textContent = displayFront;
   if (isCunecuneCard(card)) {
     item.classList.add("desktop-card-cunecune");
     const illustration = document.createElement("img");
@@ -1558,7 +1780,12 @@ function renderFolderPractice() {
   button.disabled = cards.length === 0;
   button.innerHTML = cards.length ? `${cards.length}枚を練習する <span>→</span>` : "カードがありません";
 }
-function escapeHtml(value) { const div = document.createElement("div"); div.textContent = value; return div.innerHTML; }
+function escapeHtml(value) {
+  // 本文と引用符で囲んだ属性値の両方で、安全に文字を表示する。
+  return String(value ?? "").replace(/[&<>"']/g, character => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  })[character]);
+}
 function fillFolderSelect(select, includeAll = false, excludedIds = new Set()) { select.replaceChildren(); select.add(new Option("Deskに置く", "")); data.folders.filter(folder => !excludedIds.has(folder.id)).forEach(folder => { const depth = folderDepth(folder); select.add(new Option(`${"　".repeat(depth)}${folder.name}`, folder.id)); }); }
 function folderDepth(folder) { let depth = 0; let current = folder; while (current.parentId) { depth++; current = data.folders.find(item => item.id === current.parentId); if (!current) break; } return depth; }
 function openCardDialog(card = null, destinationFolderId = undefined) {
@@ -1572,6 +1799,7 @@ function openCardDialog(card = null, destinationFolderId = undefined) {
     document.getElementById("card-front").value = card.front;
     document.getElementById("card-back").value = card.back;
     document.getElementById("card-memo").value = card.memo || "";
+    document.getElementById("card-memo-visibility").value = card.memoVisibility === "both" ? "both" : "answer-only";
     document.getElementById("card-folder").value = card.folderId || "";
   } else if (destinationFolderId !== undefined) {
     document.getElementById("card-folder").value = destinationFolderId || "";
@@ -1605,12 +1833,13 @@ function saveCard(event) {
   const front = document.getElementById("card-front").value.trim();
   const back = document.getElementById("card-back").value.trim();
   const memo = document.getElementById("card-memo").value.trim();
+  const memoVisibility = document.getElementById("card-memo-visibility").value;
   const folderId = document.getElementById("card-folder").value || null;
   if (!front || !back) return;
   const editingCard = data.cards.find(card => card.id === editingCardId);
   if (editingCard) {
     const moved = editingCard.folderId !== folderId;
-    Object.assign(editingCard, { front, back, memo, folderId });
+    Object.assign(editingCard, { front, back, memo, memoVisibility, folderId });
     if (moved) {
       const groupIndex = data.cards.filter(card => card.id !== editingCard.id && card.folderId === folderId).length;
       editingCard.x = 20 + (groupIndex % 5) * 145;
@@ -1618,7 +1847,7 @@ function saveCard(event) {
     }
   } else {
     const groupIndex = data.cards.filter(card => card.folderId === folderId).length;
-    data.cards.unshift({ id: id("card"), createdAt: Date.now(), front, back, memo, folderId, lastPracticed: null, interval: 1, x: 20 + (groupIndex % 5) * 145, y: 152 + Math.floor(groupIndex / 5) * 130 });
+    data.cards.unshift({ id: id("card"), createdAt: Date.now(), front, back, memo, memoVisibility, folderId, lastPracticed: null, interval: 1, x: 20 + (groupIndex % 5) * 145, y: 152 + Math.floor(groupIndex / 5) * 130 });
   }
   editingCardId = null;
   markDirty();
@@ -1656,9 +1885,10 @@ function deleteCard(card) {
 }
 function deleteSelectedFolder() {
   const folder = data.folders.find(item => item.id === selectedFolder);
-  if (!folder) return;
+  if (folder) deleteFolder(folder);
+}
+function deleteFolder(folder) {
   if (!discardDesktopItem(folder)) return;
-  selectedFolder = "all";
   markDirty();
   render();
 }
@@ -1703,8 +1933,8 @@ function renderReview() {
   const question = meaningToWord ? card.back : card.front;
   const answer = meaningToWord ? card.front : card.back;
   const directionLabel = meaningToWord ? "説明を見て、単語を答える" : "単語を見て、説明を答える";
-  const memo = answerVisible && card.memo ? `<div class="review-memo"><strong>メモ</strong><p>${escapeHtml(card.memo)}</p></div>` : "";
-  root.innerHTML = `<div class="review-box"><p class="review-progress">${reviewIndex + 1} / ${reviewQueue.length}</p><div class="flashcard"><small>${escapeHtml(getFolderName(card.folderId))} · ${directionLabel}</small><h2 class="${meaningToWord && answerVisible ? "review-question-secondary" : ""}">${escapeHtml(question)}</h2>${answerVisible ? `<p class="answer-large${meaningToWord ? " answer-large-word" : ""}">${escapeHtml(answer)}</p>${memo}` : ""}</div>${answerVisible ? `<div class="answer-actions"><button id="again" class="again-button" type="button">まだあやしい</button><button id="remember" class="remember-button" type="button">思い出せた！</button></div>` : `<button id="reveal" class="dark-button reveal-button" type="button">答えを見る</button>`}<button id="finish" class="text-button finish-review" type="button">復習をやめる</button></div>`;
+  const memo = card.memo && (answerVisible || card.memoVisibility === "both") ? `<div class="review-memo"><strong>メモ</strong><p>${escapeHtml(card.memo)}</p></div>` : "";
+  root.innerHTML = `<div class="review-box"><p class="review-progress">${reviewIndex + 1} / ${reviewQueue.length}</p><div class="flashcard"><small>${escapeHtml(getFolderName(card.folderId))} · ${directionLabel}</small><h2 class="${meaningToWord && answerVisible ? "review-question-secondary" : ""}">${escapeHtml(question)}</h2>${answerVisible ? `<p class="answer-large${meaningToWord ? " answer-large-word" : ""}">${escapeHtml(answer)}</p>` : ""}${memo}</div>${answerVisible ? `<div class="answer-actions"><button id="again" class="again-button" type="button">まだあやしい</button><button id="remember" class="remember-button" type="button">思い出せた！</button></div>` : `<button id="reveal" class="dark-button reveal-button" type="button">答えを見る</button>`}<button id="finish" class="text-button finish-review" type="button">復習をやめる</button></div>`;
   const reveal = document.getElementById("reveal"); if (reveal) reveal.onclick = () => { answerVisible = true; renderReview(); };
   updateReviewCharacter(root.querySelector(".review-box"), isCunecuneCard(card));
   const remember = document.getElementById("remember"); if (remember) remember.onclick = () => recordReview(card, true);
